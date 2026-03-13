@@ -1,14 +1,15 @@
 {
   "name": "nexus-backend",
-  "version": "2.1.0",
-  "description": "NEXUS AI Agent Backend",
+  "version": "3.0.0",
+  "description": "NEXUS AI Agent Backend v3 — Puppeteer + Vision + Vite",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "puppeteer-core": "^21.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
