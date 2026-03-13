@@ -11,54 +11,33 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 const WORK_DIR = '/tmp/nexus_workspace';
-const DB_PATH = '/tmp/nexus_memory.db';
 if (!fs.existsSync(WORK_DIR)) fs.mkdirSync(WORK_DIR, { recursive: true });
 
-// \u2500\u2500 SQLite Memory \u2500\u2500
-let db = null;
-function initDB() {
-  try {
-    const Database = require('better-sqlite3');
-    db = new Database(DB_PATH);
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS memory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session TEXT,
-        key TEXT,
-        value TEXT,
-        ts INTEGER
-      );
-      CREATE TABLE IF NOT EXISTS todos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session TEXT,
-        task TEXT,
-        done INTEGER DEFAULT 0,
-        ts INTEGER
-      );
-      CREATE TABLE IF NOT EXISTS history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session TEXT,
-        role TEXT,
-        content TEXT,
-        ts INTEGER
-      );
-    `);
-    console.log('SQLite ready');
-  } catch(e) {
-    console.log('SQLite not available:', e.message);
-    db = null;
-  }
+// ── In-Memory Storage (no external DB needed) ──
+const store = {
+  memory: {},   // session -> { key: value }
+  todos: {},    // session -> [ {task, done, ts} ]
+  history: {}   // session -> [ {role, content, ts} ]
+};
+
+function getSession(obj, session) {
+  if (!obj[session]) obj[session] = [];
+  return obj[session];
+}
+function getSessionObj(session) {
+  if (!store.memory[session]) store.memory[session] = {};
+  return store.memory[session];
 }
 
-// \u2500\u2500 Health \u2500\u2500
+// ── Health ──
 app.get('/', (req, res) => res.json({
   status: 'NEXUS Online',
-  version: '2.0',
+  version: '2.1',
   features: ['execute','memory','todos','history','fetch','build','git'],
-  db: db ? 'sqlite' : 'none'
+  storage: 'in-memory'
 }));
 
-// \u2500\u2500 Execute Code \u2500\u2500
+// ── Execute Code ──
 app.post('/execute', async (req, res) => {
   const { code, language, filename } = req.body;
   if (!code) return res.status(400).json({ error: 'No code' });
@@ -70,9 +49,9 @@ app.post('/execute', async (req, res) => {
   try {
     let stdout = '', stderr = '';
     const opts = { timeout: 30000, cwd: sessionDir };
-    if (language === 'python')      ({ stdout, stderr } = await execAsync(`python3 "${filePath}"`, opts));
-    else if (language === 'node')   ({ stdout, stderr } = await execAsync(`node "${filePath}"`, opts));
-    else if (language === 'bash')   ({ stdout, stderr } = await execAsync(`bash "${filePath}"`, opts));
+    if (language === 'python')     ({ stdout, stderr } = await execAsync(`python3 "${filePath}"`, opts));
+    else if (language === 'node')  ({ stdout, stderr } = await execAsync(`node "${filePath}"`, opts));
+    else if (language === 'bash')  ({ stdout, stderr } = await execAsync(`bash "${filePath}"`, opts));
     else stdout = 'File created';
     const files = fs.readdirSync(sessionDir).map(f => {
       const fp = path.join(sessionDir, f);
@@ -86,7 +65,7 @@ app.post('/execute', async (req, res) => {
   }
 });
 
-// \u2500\u2500 Install Packages \u2500\u2500
+// ── Install Packages ──
 app.post('/install', async (req, res) => {
   const { packages, manager } = req.body;
   if (!packages?.length) return res.status(400).json({ error: 'No packages' });
@@ -99,108 +78,182 @@ app.post('/install', async (req, res) => {
   } catch (err) { res.json({ success: false, error: err.message }); }
 });
 
-// \u2500\u2500 Memory (SQLite) \u2500\u2500
+// ── Memory ──
 app.post('/memory/set', (req, res) => {
-  const { session='default', key, value } = req.body;
+  const { session = 'default', key, value } = req.body;
   if (!key) return res.status(400).json({ error: 'No key' });
-  if (!db) return res.json({ success: true, note: 'no db' });
-  try {
-    db.prepare('DELETE FROM memory WHERE session=? AND key=?').run(session, key);
-    db.prepare('INSERT INTO memory (session,key,value,ts) VALUES (?,?,?,?)').run(session, key, JSON.stringify(value), Date.now());
-    res.json({ success: true });
-  } catch(e) { res.json({ success: false, error: e.message }); }
+  getSessionObj(session)[key] = value;
+  res.json({ success: true });
 });
 
 app.post('/memory/get', (req, res) => {
-  const { session='default', key } = req.body;
-  if (!db) return res.json({ success: true, value: null });
-  try {
-    const row = db.prepare('SELECT value FROM memory WHERE session=? AND key=?').get(session, key);
-    res.json({ success: true, value: row ? JSON.parse(row.value) : null });
-  } catch(e) { res.json({ success: false, error: e.message }); }
+  const { session = 'default', key } = req.body;
+  const val = getSessionObj(session)[key] ?? null;
+  res.json({ success: true, value: val });
 });
 
 app.post('/memory/all', (req, res) => {
-  const { session='default' } = req.body;
-  if (!db) return res.json({ success: true, data: {} });
-  try {
-    const rows = db.prepare('SELECT key,value FROM memory WHERE session=?').all(session);
-    const data = {};
-    rows.forEach(r => { data[r.key] = JSON.parse(r.value); });
-    res.json({ success: true, data });
-  } catch(e) { res.json({ success: false, error: e.message }); }
+  const { session = 'default' } = req.body;
+  res.json({ success: true, data: getSessionObj(session) });
 });
 
-// \u2500\u2500 Todo List (\u0632\u064a Manus) \u2500\u2500
+// ── Todo List (زي Manus) ──
 app.post('/todos/add', (req, res) => {
-  const { session='default', task } = req.body;
+  const { session = 'default', task } = req.body;
   if (!task) return res.status(400).json({ error: 'No task' });
-  if (!db) return res.json({ success: true });
-  try {
-    db.prepare('INSERT INTO todos (session,task,done,ts) VALUES (?,?,0,?)').run(session, task, Date.now());
-    res.json({ success: true });
-  } catch(e) { res.json({ success: false, error: e.message }); }
+  getSession(store.todos, session).push({ task, done: false, ts: Date.now() });
+  res.json({ success: true });
 });
 
 app.post('/todos/done', (req, res) => {
-  const { session='default', task } = req.body;
-  if (!db) return res.json({ success: true });
-  try {
-    db.prepare('UPDATE todos SET done=1 WHERE session=? AND task=?').run(session, task);
-    res.json({ success: true });
-  } catch(e) { res.json({ success: false, error: e.message }); }
+  const { session = 'default', task } = req.body;
+  const todos = getSession(store.todos, session);
+  const t = todos.find(x => x.task === task);
+  if (t) t.done = true;
+  res.json({ success: true });
 });
 
 app.post('/todos/list', (req, res) => {
-  const { session='default' } = req.body;
-  if (!db) return res.json({ success: true, todos: [] });
-  try {
-    const todos = db.prepare('SELECT task,done FROM todos WHERE session=? ORDER BY ts').all(session);
-    res.json({ success: true, todos });
-  } catch(e) { res.json({ success: false, error: e.message }); }
+  const { session = 'default' } = req.body;
+  res.json({ success: true, todos: getSession(store.todos, session) });
 });
 
-// \u2500\u2500 Chat History \u2500\u2500
+app.post('/todos/clear', (req, res) => {
+  const { session = 'default' } = req.body;
+  store.todos[session] = [];
+  res.json({ success: true });
+});
+
+// ── Chat History ──
 app.post('/history/add', (req, res) => {
-  const { session='default', role, content } = req.body;
-  if (!db) return res.json({ success: true });
-  try {
-    db.prepare('INSERT INTO history (session,role,content,ts) VALUES (?,?,?,?)').run(session, role, content, Date.now());
-    // keep last 50 messages only
-    db.prepare('DELETE FROM history WHERE session=? AND id NOT IN (SELECT id FROM history WHERE session=? ORDER BY ts DESC LIMIT 50)').run(session, session);
-    res.json({ success: true });
-  } catch(e) { res.json({ success: false, error: e.message }); }
+  const { session = 'default', role, content } = req.body;
+  const h = getSession(store.history, session);
+  h.push({ role, content, ts: Date.now() });
+  // keep last 50 only
+  if (h.length > 50) store.history[session] = h.slice(-50);
+  res.json({ success: true });
 });
 
 app.post('/history/get', (req, res) => {
-  const { session='default', limit=20 } = req.body;
-  if (!db) return res.json({ success: true, messages: [] });
-  try {
-    const messages = db.prepare('SELECT role,content FROM history WHERE session=? ORDER BY ts DESC LIMIT ?').all(session, limit).reverse();
-    res.json({ success: true, messages });
-  } catch(e) { res.json({ success: false, error: e.message }); }
+  const { session = 'default', limit = 20 } = req.body;
+  const h = getSession(store.history, session);
+  res.json({ success: true, messages: h.slice(-limit) });
 });
 
 app.post('/history/clear', (req, res) => {
-  const { session='default' } = req.body;
-  if (!db) return res.json({ success: true });
-  try {
-    db.prepare('DELETE FROM history WHERE session=?').run(session);
-    db.prepare('DELETE FROM todos WHERE session=?').run(session);
-    res.json({ success: true });
-  } catch(e) { res.json({ success: false, error: e.message }); }
+  const { session = 'default' } = req.body;
+  store.history[session] = [];
+  store.todos[session] = [];
+  store.memory[session] = {};
+  res.json({ success: true });
 });
 
-// \u2500\u2500 Fetch URL \u2500\u2500
+// ── Fetch URL ──
 app.post('/fetch', async (req, res) => {
-  const { url, js=false } = req.body;
+  const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'No URL' });
   try {
     const { stdout } = await execAsync(
       `curl -s -L --max-time 15 --compressed -A "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36" "${url}" | head -c 80000`,
       { timeout: 20000 }
     );
-    // Clean HTML \u2014 remove scripts/styles for readability
     const clean = stdout
       .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 8000);
+    res.json({ success: true, content: stdout, text: clean });
+  } catch (err) { res.json({ success: false, error: err.message }); }
+});
+
+// ── File System ──
+app.post('/files/write', (req, res) => {
+  const { filePath, content } = req.body;
+  try {
+    const full = path.join(WORK_DIR, filePath);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, content);
+    res.json({ success: true });
+  } catch (err) { res.json({ success: false, error: err.message }); }
+});
+
+app.get('/files/read', (req, res) => {
+  try {
+    const content = fs.readFileSync(path.join(WORK_DIR, req.query.filePath), 'utf8');
+    res.json({ success: true, content });
+  } catch (err) { res.json({ success: false, error: err.message }); }
+});
+
+app.get('/files/list', (req, res) => {
+  try {
+    const dir = req.query.dir ? path.join(WORK_DIR, req.query.dir) : WORK_DIR;
+    const files = fs.readdirSync(dir).map(f => {
+      const fp = path.join(dir, f);
+      const stat = fs.statSync(fp);
+      return { name: f, size: stat.size, isDir: stat.isDirectory() };
+    });
+    res.json({ success: true, files });
+  } catch (err) { res.json({ success: false, error: err.message }); }
+});
+
+// ── Build Project ──
+app.post('/build', async (req, res) => {
+  const { files, buildCmd } = req.body;
+  if (!files) return res.status(400).json({ error: 'No files' });
+  const buildDir = path.join(WORK_DIR, 'build_' + Date.now());
+  fs.mkdirSync(buildDir, { recursive: true });
+  try {
+    for (const [name, content] of Object.entries(files)) {
+      const fp = path.join(buildDir, name);
+      fs.mkdirSync(path.dirname(fp), { recursive: true });
+      fs.writeFileSync(fp, content);
+    }
+    let output = 'Files written';
+    if (buildCmd) {
+      const { stdout } = await execAsync(buildCmd, { cwd: buildDir, timeout: 120000 });
+      output = stdout;
+    }
+    const allFiles = {};
+    const walk = (dir) => {
+      for (const f of fs.readdirSync(dir)) {
+        const fp = path.join(dir, f);
+        if (fs.statSync(fp).isDirectory()) { walk(fp); continue; }
+        try { allFiles[path.relative(buildDir, fp)] = fs.readFileSync(fp, 'utf8'); } catch {}
+      }
+    };
+    walk(buildDir);
+    res.json({ success: true, output, files: allFiles });
+  } catch (err) { res.json({ success: false, error: err.message }); }
+});
+
+// ── Git Push ──
+app.post('/git/push', async (req, res) => {
+  const { token, repo, files, message = 'NEXUS commit' } = req.body;
+  if (!token || !repo || !files) return res.status(400).json({ error: 'Missing params' });
+  const repoDir = path.join(WORK_DIR, 'git_' + Date.now());
+  fs.mkdirSync(repoDir, { recursive: true });
+  try {
+    for (const [fname, content] of Object.entries(files)) {
+      const fp = path.join(repoDir, fname);
+      fs.mkdirSync(path.dirname(fp), { recursive: true });
+      fs.writeFileSync(fp, content);
+    }
+    const remote = `https://${token}@github.com/${repo}.git`;
+    const { stdout } = await execAsync([
+      'git init',
+      'git config user.email "nexus@agent.ai"',
+      'git config user.name "NEXUS"',
+      'git add .',
+      `git commit -m "${message}"`,
+      `git remote add origin ${remote}`,
+      'git push -u origin main --force 2>&1 || git push -u origin master --force 2>&1'
+    ].join(' && '), { cwd: repoDir, timeout: 60000 });
+    res.json({ success: true, output: stdout });
+  } catch (err) { res.json({ success: false, error: err.message }); }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`NEXUS v2.1 running on port ${PORT}`));
+         
