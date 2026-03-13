@@ -1,16 +1,14 @@
 {
   "name": "nexus-backend",
-  "version": "2.0.0",
-  "description": "NEXUS AI Agent Backend v2 — with SQLite memory",
+  "version": "2.1.0",
+  "description": "NEXUS AI Agent Backend",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "build": "npm install"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "better-sqlite3": "^9.4.3"
+    "cors": "^2.8.5"
   },
   "engines": {
     "node": ">=18.0.0"
