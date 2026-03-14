@@ -15,9 +15,9 @@ if (!fs.existsSync(WORK_DIR)) fs.mkdirSync(WORK_DIR, { recursive: true });
 
 // ── Keys stored SECURELY on backend ──
 const KEYS = {
-  groq:    process.env.GROQ_KEY    || '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',
-  netlify: process.env.NETLIFY_KEY || 'nfp_ba6C4XJhzjbwhPJbzazJJZGChH1wp2qm8d7b',
-  github:  process.env.GITHUB_KEY  || 'ghp_DAH1UPRLcRMebEvg83q8O7m055HEZK4ZgGBc',
+  groq:    process.env.GROQ_KEY    || '',
+  netlify: process.env.NETLIFY_KEY || '',
+  github:  process.env.GITHUB_KEY  || '',
 };
 
 // ── In-Memory Storage ──
@@ -249,3 +249,4 @@ app.post('/git/push', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`NEXUS v4.0 running on port ${PORT}`));
+          
